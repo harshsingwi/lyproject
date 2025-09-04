@@ -1,0 +1,189 @@
+# Grapevine Disease Detection System Configuration
+# ==============================================
+
+# Data Configuration
+data:
+  # Path to hyperspectral dataset directory
+  data_dir: "./hyperspectral_data"
+  
+  # Output directory for results
+  output_dir: "./results"
+  
+  # Subset size for testing (null for full dataset)
+  subset_size: null
+  
+  # File patterns for different file types
+  file_patterns:
+    header_files: "*.hdr"
+    data_files: "*.dat"
+  
+  # Dataset validation
+  validate_data: true
+  
+  # Data augmentation settings
+  augmentation:
+    enabled: true
+    factor: 2  # Number of augmented samples per original
+    noise_level: 0.01
+    enable_spectral_shift: true
+    enable_baseline_drift: true
+    enable_scale_variation: true
+
+# Preprocessing Configuration
+preprocessing:
+  # Preprocessing pipeline (applied in order)
+  pipeline:
+    - "savgol"      # Savitzky-Golay smoothing
+    - "snv"         # Standard Normal Variate
+    - "robust_scale"  # Robust scaling
+  
+  # Savitzky-Golay filter parameters
+  savgol:
+    window_length: 11
+    polyorder: 2
+  
+  # Dimensionality reduction
+  pca:
+    enabled: true
+    n_components: 50
+    
+  # Background segmentation
+  segmentation:
+    enabled: true
+    method: "otsu"  # Options: otsu, mean, adaptive
+  
+  # Wavelength range (nm)
+  wavelength_range:
+    min: 400
+    max: 1000
+
+# Feature Extraction Configuration
+features:
+  # Extract vegetation indices
+  vegetation_indices: true
+  
+  # Extract statistical features
+  statistical_features: true
+  
+  # Feature selection
+  selection:
+    enabled: false
+    method: "mutual_info"  # Options: mutual_info, f_classif, chi2
+    n_features: 100
+
+# Model Configuration
+models:
+  # Random Forest parameters
+  random_forest:
+    enabled: true
+    n_estimators: 200
+    max_depth: 10
+    min_samples_split: 5
+    min_samples_leaf: 2
+    random_state: 42
+    n_jobs: -1
+  
+  # SVM parameters
+  svm:
+    enabled: true
+    kernel: "rbf"
+    C: 1.0
+    gamma: "scale"
+    probability: true
+    random_state: 42
+  
+  # CNN parameters
+  cnn:
+    enabled: true
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.001
+    early_stopping_patience: 15
+    reduce_lr_patience: 10
+    dropout_rate: 0.3
+
+# Training Configuration
+training:
+  # Data split ratios
+  test_size: 0.15
+  validation_size: 0.15
+  
+  # Cross-validation
+  cross_validation:
+    enabled: false
+    folds: 5
+    
+  # Random seed for reproducibility
+  random_state: 42
+  
+  # Class balancing
+  balance_classes: true
+
+# Evaluation Configuration
+evaluation:
+  # Metrics to compute
+  metrics:
+    - "accuracy"
+    - "precision"
+    - "recall"
+    - "f1_score"
+    - "confusion_matrix"
+  
+  # Generate classification report
+  classification_report: true
+  
+  # Save predictions
+  save_predictions: true
+
+# Visualization Configuration
+visualization:
+  # Generate plots
+  enabled: true
+  
+  # DPI for saved plots
+  dpi: 300
+  
+  # Plot types to generate
+  plots:
+    spectral_signatures: true
+    confusion_matrices: true
+    pca_projection: true
+    feature_importance: true
+    training_history: true
+    
+  # Style
+  style: "seaborn-v0_8"  # matplotlib style
+
+# Output Configuration
+output:
+  # Save trained models
+  save_models: true
+  
+  # Model format
+  model_format: "pickle"  # Options: pickle, joblib
+  
+  # Save feature extractors and scalers
+  save_preprocessors: true
+  
+  # Generate reports
+  generate_report: true
+  
+  # Verbose logging
+  verbose: true
+  
+  # Log file
+  log_file: "grapevine_detection.log"
+
+# Advanced Configuration
+advanced:
+  # Multi-processing
+  n_jobs: -1
+  
+  # Memory optimization
+  low_memory_mode: false
+  
+  # GPU usage (for deep learning)
+  use_gpu: true
+  
+  # Reproducibility
+  deterministic: true
