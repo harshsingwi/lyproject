@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hyperspectral Dataset Organizer
-===============================
+Grapevine Disease Dataset Organizer
+===================================
 
-This script organizes hyperspectral files (.hdr/.dat pairs) based on metadata
-into appropriate directory structure for the grapevine disease detection system.
+Organizes hyperspectral PNG images into training dataset structure
+for grapevine disease detection.
 
 Usage:
-    python organize_dataset.py --source-dir ./raw_hyperspectral_data --output-dir ./organized_data --metadata description-2.csv
+    python organize_dataset.py --png-dir ./raw_png_images --output-dir ./organized_dataset --metadata description-2.csv
 """
 
 import os
@@ -17,354 +17,511 @@ import argparse
 from pathlib import Path
 from typing import Dict, List, Tuple
 import logging
+import re
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-class DatasetOrganizer:
-    """Organize hyperspectral dataset files based on metadata"""
+class GrapevineDatasetOrganizer:
+    """Organizes grapevine disease detection dataset from PNG images"""
     
-    def __init__(self, source_dir: str, output_dir: str):
-        self.source_dir = Path(source_dir)
+    def __init__(self, png_source_dir: str, output_dir: str, metadata_path: str):
+        self.png_source_dir = Path(png_source_dir)
         self.output_dir = Path(output_dir)
+        self.metadata_path = Path(metadata_path)
         
         # Create output directory structure
         self.class_dirs = {
             'healthy': self.output_dir / 'healthy',
             'diseased': self.output_dir / 'diseased', 
-            'unknown': self.output_dir / 'unknown'  # For unclassified samples
+            'test': self.output_dir / 'test'  # For unmatched files
         }
         
-        # Create directories
         for class_dir in self.class_dirs.values():
             class_dir.mkdir(parents=True, exist_ok=True)
     
-    def load_metadata(self, metadata_path: str) -> pd.DataFrame:
-        """Load metadata from CSV file"""
-        metadata_file = Path(metadata_path)
+    def load_metadata(self) -> pd.DataFrame:
+        """Load and validate metadata from CSV file"""
+        if not self.metadata_path.exists():
+            raise FileNotFoundError(f"Metadata file not found: {self.metadata_path}")
         
-        # Check if file exists in current directory or in source directory
-        if not metadata_file.exists():
-            # Try to find the file in the source directory
-            metadata_file = self.source_dir / metadata_path
-            if not metadata_file.exists():
-                # Try to find the file with different names
-                possible_names = [
-                    metadata_path,
-                    "description-2.csv",
-                    "metadata.csv",
-                    "description.csv"
-                ]
-                
-                for name in possible_names:
-                    if Path(name).exists():
-                        metadata_file = Path(name)
-                        break
-                else:
-                    # List available files to help with debugging
-                    current_dir_files = [f.name for f in Path('.').iterdir() if f.is_file()]
-                    source_dir_files = [f.name for f in self.source_dir.iterdir()] if self.source_dir.exists() else []
-                    
-                    logger.error(f"Available files in current directory: {current_dir_files}")
-                    logger.error(f"Available files in source directory: {source_dir_files}")
-                    raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
-        
-        logger.info(f"Loading metadata from {metadata_file}")
+        logger.info(f"Loading metadata from {self.metadata_path}")
         
         # Try different delimiters and encodings
-        try:
-            metadata = pd.read_csv(metadata_file, delimiter=';', encoding='utf-8')
-        except:
-            try:
-                metadata = pd.read_csv(metadata_file, delimiter=';', encoding='latin-1')
-            except:
+        encodings = ['utf-8', 'latin-1', 'iso-8859-1']
+        delimiters = [';', ',', '\t']
+        
+        for encoding in encodings:
+            for delimiter in delimiters:
                 try:
-                    metadata = pd.read_csv(metadata_file, delimiter=',', encoding='utf-8')
-                except:
-                    try:
-                        metadata = pd.read_csv(metadata_file, delimiter=',', encoding='latin-1')
-                    except:
-                        try:
-                            metadata = pd.read_csv(metadata_file, delimiter='\t', encoding='utf-8')
-                        except Exception as e:
-                            raise ValueError(f"Could not parse metadata file: {e}")
+                    metadata = pd.read_csv(self.metadata_path, delimiter=delimiter, encoding=encoding)
+                    logger.info(f"Successfully loaded metadata with {delimiter} delimiter and {encoding} encoding")
+                    
+                    # Validate required columns
+                    required_columns = ['imageID', 'directoryName', 'symptom']
+                    missing_columns = [col for col in required_columns if col not in metadata.columns]
+                    
+                    if missing_columns:
+                        logger.warning(f"Missing columns in metadata: {missing_columns}")
+                        # Try case-insensitive matching
+                        for col in required_columns:
+                            col_lower = col.lower()
+                            matching_cols = [c for c in metadata.columns if c.lower() == col_lower]
+                            if matching_cols:
+                                metadata.rename(columns={matching_cols[0]: col}, inplace=True)
+                    
+                    return metadata
+                except Exception as e:
+                    continue
         
-        # Check if we have the required columns
-        required_columns = ['imageID', 'symptom']
-        for col in required_columns:
-            if col not in metadata.columns:
-                # Try case-insensitive matching
-                col_lower = col.lower()
-                matching_cols = [c for c in metadata.columns if c.lower() == col_lower]
-                if matching_cols:
-                    # Rename to standard column name
-                    metadata.rename(columns={matching_cols[0]: col}, inplace=True)
-                else:
-                    raise ValueError(f"Metadata file missing required column: {col}")
-        
-        return metadata
-    
-    def classify_symptom(self, symptom: str) -> str:
-        """Classify symptom into disease categories"""
-        if pd.isna(symptom):
-            return 'unknown'
+        raise ValueError("Could not parse metadata file with any delimiter or encoding")
+        """Classify symptom into disease categories for grapevines"""
+        if pd.isna(symptom) or not isinstance(symptom, str):
+            return 'test'
             
-        symptom_lower = str(symptom).lower().strip()
+        symptom_lower = symptom.lower().strip()
         
-        # Handle special characters and variations
-        symptom_lower = symptom_lower.replace('@', 'é').replace('?', 'é')  # Fix encoding issues
+        # Handle common encoding issues
+        symptom_lower = (symptom_lower
+                        .replace('@', 'é')
+                        .replace('?', 'é')
+                        .replace('é', 'é')  # Different é encoding
+                        .replace('Ã©', 'é'))  # UTF-8 mishandling
         
-        if symptom_lower in ['healthy', 'ok', 'normal', 'sain']:
+        # Healthy classifications
+        healthy_patterns = [
+            'healthy', 'ok', 'normal', 'sain', 'saine', 
+            'bon état', 'good condition', 'no symptoms'
+        ]
+        
+        # Disease patterns (common grapevine diseases)
+        disease_patterns = [
+            'flavescence', 'dorée', 'doree', 'fd', 'golden flavescence',
+            'treehopper', 'leafhopper', 'cicadelle',
+            'mildew', 'downy mildew', 'powdery mildew',
+            'esca', 'black measles', 'black dead arm',
+            'botrytis', 'grey rot', 'bunch rot',
+            'eutypa', 'dieback', 'dead arm',
+            'phomopsis', 'cane and leaf spot',
+            'black rot', 'anthracnose',
+            'virus', 'leafroll', 'fanleaf',
+            'deficiency', 'chlorosis', 'nutritional',
+            'stress', 'water stress', 'drought',
+            'damaged', 'injury', 'wound',
+            'wood diseases', 'trunk diseases'
+        ]
+        
+        if any(pattern in symptom_lower for pattern in healthy_patterns):
             return 'healthy'
-        elif symptom_lower in ['diseased', 'flavescence dorée', 'flavescence doree', 'fd', 
-                              'buffalo treehopper', 'green leafhopper', 'sick', 'disease',
-                              'maladie']:
+        elif any(pattern in symptom_lower for pattern in disease_patterns):
             return 'diseased'
-        elif symptom_lower in ['water stress', 'stress hydrique']:
-            return 'diseased'  # Treat water stress as a disease for binary classification
         else:
-            logger.warning(f"Unknown symptom: {symptom}")
-            return 'unknown'
+            logger.warning(f"Unknown symptom pattern: '{symptom}' -> classifying as 'test'")
+            return 'test'
+
+    def classify_disease_status(self, symptom: str) -> str:
+        """Classify symptom into disease categories for grapevines"""
+        if pd.isna(symptom) or not isinstance(symptom, str):
+            return 'test'
+            
+        symptom_lower = symptom.lower().strip()
+        
+        # Handle common encoding issues
+        symptom_lower = (symptom_lower
+                        .replace('@', 'é')
+                        .replace('?', 'é')
+                        .replace('é', 'é')  # Different é encoding
+                        .replace('Ã©', 'é'))  # UTF-8 mishandling
+        
+        # Healthy classifications
+        healthy_patterns = [
+            'healthy', 'ok', 'normal', 'sain', 'saine', 
+            'bon état', 'good condition', 'no symptoms'
+        ]
+        
+        # Disease patterns (common grapevine diseases)
+        disease_patterns = [
+            'flavescence', 'dorée', 'doree', 'fd', 'golden flavescence',
+            'treehopper', 'leafhopper', 'cicadelle',
+            'mildew', 'downy mildew', 'powdery mildew',
+            'esca', 'black measles', 'black dead arm',
+            'botrytis', 'grey rot', 'bunch rot',
+            'eutypa', 'dieback', 'dead arm',
+            'phomopsis', 'cane and leaf spot',
+            'black rot', 'anthracnose',
+            'virus', 'leafroll', 'fanleaf',
+            'deficiency', 'chlorosis', 'nutritional',
+            'stress', 'water stress', 'drought',
+            'damaged', 'injury', 'wound',
+            'wood diseases', 'trunk diseases',
+            'senescence',  
+            'discoloration' 
+        ]
+        
+        if any(pattern in symptom_lower for pattern in healthy_patterns):
+            return 'healthy'
+        elif any(pattern in symptom_lower for pattern in disease_patterns):
+            return 'diseased'
+        else:
+            logger.warning(f"Unknown symptom pattern: '{symptom}' -> classifying as 'test'")
+            return 'test'
+
+    def discover_png_files(self) -> List[Path]:
+        """Discover all PNG image files with comprehensive pattern matching"""
+        png_patterns = [
+            '*.png', '*.PNG',
+            'REFLECTANCE_*.png', 'REFLECTANCE_*.PNG',
+            'reflectance_*.png', 'reflectance_*.PNG',
+            'RGB_*.png', 'RGB_*.PNG',
+            '2020-*.png', '2020-*.PNG',
+            '2021-*.png', '2021-*.PNG',
+            '**/*.png', '**/*.PNG'  # Recursive search
+        ]
+        
+        png_files = []
+        for pattern in png_patterns:
+            try:
+                png_files.extend(list(self.png_source_dir.rglob(pattern)))
+            except Exception as e:
+                logger.debug(f"Pattern {pattern} failed: {e}")
+        
+        # Remove duplicates and sort
+        png_files = sorted(list(set(png_files)))
+        
+        logger.info(f"Discovered {len(png_files)} PNG files in {self.png_source_dir}")
+        
+        # Log first few files for verification
+        for i, file_path in enumerate(png_files[:5]):
+            logger.debug(f"Sample file {i+1}: {file_path.name}")
+        
+        return png_files
     
-    def find_hyperspectral_files(self) -> Dict[str, List[Path]]:
-        """Find all .hdr and .dat files in source directory"""
-        # Handle case-insensitive file extensions
-        hdr_files = list(self.source_dir.rglob('*.hdr')) + list(self.source_dir.rglob('*.HDR'))
-        dat_files = list(self.source_dir.rglob('*.dat')) + list(self.source_dir.rglob('*.DAT'))
+    def extract_identifier(self, filename: str) -> str:
+        """Extract unique identifier from filename patterns"""
+        patterns = [
+            r'REFLECTANCE_(\d{4}-\d{2}-\d{2}_\d+)',
+            r'reflectance_(\d{4}-\d{2}-\d{2}_\d+)',
+            r'RGB_(\d{4}-\d{2}-\d{2}_\d+)',
+            r'(\d{4}-\d{2}-\d{2}_\d+)',
+            r'(\d{4}-\d{2}-\d{2}_\d{3})',
+            r'image_?(\d+)',
+            r'sample_?(\d+)',
+            r'(\d+)_reflectance',
+            r'reflectance_(\d+)'
+        ]
         
-        files = {
-            'hdr_files': hdr_files,
-            'dat_files': dat_files
-        }
+        for pattern in patterns:
+            match = re.search(pattern, filename, re.IGNORECASE)
+            if match:
+                return match.group(1)
         
-        logger.info(f"Found {len(files['hdr_files'])} .hdr files")
-        logger.info(f"Found {len(files['dat_files'])} .dat files")
-        
-        return files
+        return None
     
-    def match_files_to_metadata(self, metadata: pd.DataFrame, files: Dict) -> Dict:
-        """Match files to metadata entries"""
+    def match_images_to_metadata(self, metadata: pd.DataFrame, png_files: List[Path]) -> Dict:
+        """Match PNG files to metadata entries using multiple strategies"""
         matched_files = []
         unmatched_files = []
         
-        # Create mapping from directory names and image IDs
+        # Create comprehensive lookup dictionary
         metadata_lookup = {}
         for _, row in metadata.iterrows():
-            # Add both imageID and directoryName as possible matches
-            metadata_lookup[str(row['imageID'])] = row
+            # Use directoryName as primary key
             if 'directoryName' in row and pd.notna(row['directoryName']):
-                metadata_lookup[str(row['directoryName'])] = row
+                dir_name = str(row['directoryName']).strip()
+                metadata_lookup[dir_name] = row
+            
+            # Use imageID as secondary key
+            if 'imageID' in row and pd.notna(row['imageID']):
+                image_id = str(row['imageID']).strip()
+                metadata_lookup[image_id] = row
+            
+            # Create variations for flexible matching
+            if 'directoryName' in row and pd.notna(row['directoryName']):
+                dir_var = str(row['directoryName']).replace('-', '_').strip()
+                if dir_var not in metadata_lookup:
+                    metadata_lookup[dir_var] = row
         
-        # Process HDR files (dat files should follow)
-        for hdr_file in files['hdr_files']:
-            file_stem = hdr_file.stem
-            file_name = hdr_file.name
+        logger.info(f"Created metadata lookup with {len(metadata_lookup)} keys")
+        
+        # Match files using multiple strategies
+        for png_file in png_files:
+            filename = png_file.name
+            file_id = self.extract_identifier(filename)
+            
             matched = False
             
-            # Try to match with metadata using different strategies
-            for key, metadata_row in metadata_lookup.items():
-                # Multiple matching strategies
-                if (key == file_stem or 
-                    key in file_stem or 
-                    file_stem in key or
-                    key == file_name or
-                    key in file_name):
-                    
-                    # Find corresponding .dat file
-                    dat_file = hdr_file.with_suffix('.dat')
-                    if not dat_file.exists():
-                        # Try alternative naming patterns and cases
-                        dat_file_candidates = [
-                            hdr_file.parent / f"{file_stem}.dat",
-                            hdr_file.parent / f"{file_stem}.DAT",
-                            hdr_file.parent / f"{file_stem}_data.dat",
-                            hdr_file.parent / f"{file_stem}.data",
-                            hdr_file.parent / f"{file_name}.dat",
-                            hdr_file.parent / f"{file_name}.DAT"
-                        ]
-                        
-                        for candidate in dat_file_candidates:
-                            if candidate.exists():
-                                dat_file = candidate
-                                break
-                        else:
-                            logger.warning(f"No .dat file found for {hdr_file}")
-                            continue
-                    
-                    if dat_file.exists():
+            # Strategy 1: Direct ID match
+            if file_id and file_id in metadata_lookup:
+                metadata_row = metadata_lookup[file_id]
+                matched_files.append({
+                    'image_path': png_file,
+                    'metadata': metadata_row,
+                    'class': self.classify_disease_status(metadata_row.get('symptom', ''))
+                })
+                matched = True
+            
+            # Strategy 2: Partial filename matching
+            if not matched:
+                for key in metadata_lookup.keys():
+                    if (key in filename or filename in key or 
+                        key.replace('-', '_') in filename.replace('-', '_')):
+                        metadata_row = metadata_lookup[key]
                         matched_files.append({
-                            'hdr_file': hdr_file,
-                            'dat_file': dat_file,
+                            'image_path': png_file,
                             'metadata': metadata_row,
-                            'class': self.classify_symptom(metadata_row['symptom'])
+                            'class': self.classify_disease_status(metadata_row.get('symptom', ''))
+                        })
+                        matched = True
+                        break
+            
+            # Strategy 3: Stem matching (filename without extension)
+            if not matched:
+                file_stem = png_file.stem
+                for key in metadata_lookup.keys():
+                    if key in file_stem or file_stem in key:
+                        metadata_row = metadata_lookup[key]
+                        matched_files.append({
+                            'image_path': png_file,
+                            'metadata': metadata_row,
+                            'class': self.classify_disease_status(metadata_row.get('symptom', ''))
                         })
                         matched = True
                         break
             
             if not matched:
-                unmatched_files.append(hdr_file)
+                unmatched_files.append(png_file)
+                logger.debug(f"Unmatched file: {filename}")
         
-        logger.info(f"Matched {len(matched_files)} file pairs with metadata")
+        logger.info(f"Successfully matched {len(matched_files)} images")
         logger.info(f"Unmatched files: {len(unmatched_files)}")
-        
-        if unmatched_files:
-            logger.warning("Some files could not be matched with metadata:")
-            for file in unmatched_files[:5]:  # Show first 5 unmatched files
-                logger.warning(f"  - {file.name}")
-            if len(unmatched_files) > 5:
-                logger.warning(f"  ... and {len(unmatched_files) - 5} more")
         
         return {
             'matched': matched_files,
             'unmatched': unmatched_files
         }
     
-    def organize_files(self, matched_data: Dict) -> Dict:
-        """Copy files to organized directory structure"""
+    def organize_training_data(self, matched_data: Dict) -> Dict:
+        """Organize matched files into training dataset structure"""
         results = {
             'healthy': 0,
             'diseased': 0,
-            'unknown': 0,
+            'test': 0,
             'errors': []
         }
         
+        # Process matched files
         for file_info in matched_data['matched']:
             try:
                 target_class = file_info['class']
                 target_dir = self.class_dirs[target_class]
                 
-                # Create unique filenames using imageID
-                image_id = file_info['metadata']['imageID']
+                # Generate clean filename
+                if 'imageID' in file_info['metadata'] and pd.notna(file_info['metadata']['imageID']):
+                    image_id = str(file_info['metadata']['imageID']).strip()
+                    clean_name = re.sub(r'[^\w\-_]', '_', image_id)  # Sanitize filename
+                    target_path = target_dir / f"{clean_name}.png"
+                else:
+                    # Fallback to original filename
+                    target_path = target_dir / file_info['image_path'].name
                 
-                # Copy HDR file
-                hdr_target = target_dir / f"{image_id}.hdr"
-                shutil.copy2(file_info['hdr_file'], hdr_target)
-                
-                # Copy DAT file  
-                dat_target = target_dir / f"{image_id}.dat"
-                shutil.copy2(file_info['dat_file'], dat_target)
+                # Copy image file
+                shutil.copy2(file_info['image_path'], target_path)
                 
                 results[target_class] += 1
-                logger.info(f"Copied {image_id} to {target_class}/")
+                logger.debug(f"Organized {target_path.name} -> {target_class}")
                 
             except Exception as e:
-                image_id = file_info.get('metadata', {}).get('imageID', 'unknown')
-                error_msg = f"Error copying {image_id}: {e}"
+                error_msg = f"Error organizing {file_info['image_path'].name}: {str(e)}"
+                logger.error(error_msg)
+                results['errors'].append(error_msg)
+        
+        # Process unmatched files (put in test folder)
+        for png_file in matched_data['unmatched']:
+            try:
+                target_path = self.class_dirs['test'] / png_file.name
+                shutil.copy2(png_file, target_path)
+                results['test'] += 1
+            except Exception as e:
+                error_msg = f"Error copying unmatched file {png_file.name}: {str(e)}"
                 logger.error(error_msg)
                 results['errors'].append(error_msg)
         
         return results
-    
-    def generate_summary_report(self, metadata: pd.DataFrame, results: Dict):
-        """Generate organization summary report"""
-        
+        """Generate comprehensive organization report"""
         print("\n" + "="*60)
-        print("DATASET ORGANIZATION SUMMARY")
+        print("GRAPEVINE DISEASE DATASET ORGANIZATION REPORT")
         print("="*60)
         
-        print(f"\nSource directory: {self.source_dir}")
-        print(f"Output directory: {self.output_dir}")
+        print(f"\n📁 Source PNG Directory: {self.png_source_dir}")
+        print(f"📁 Output Dataset Directory: {self.output_dir}")
+        print(f"📄 Metadata File: {self.metadata_path}")
         
-        print(f"\nOriginal dataset composition:")
+        print(f"\n📊 Metadata Statistics:")
+        print(f"   Total metadata entries: {len(metadata)}")
+        
         if 'symptom' in metadata.columns:
             symptom_counts = metadata['symptom'].value_counts()
+            print(f"   Symptom distribution:")
             for symptom, count in symptom_counts.items():
-                print(f"  {symptom}: {count}")
+                classification = self.classify_disease_status(symptom)
+                print(f"     {symptom}: {count} -> {classification}")
         
-        print(f"\nOrganized files by class:")
-        total_organized = 0
-        for class_name in ['healthy', 'diseased', 'unknown']:
-            count = results[class_name]
-            total_organized += count
-            print(f"  {class_name}: {count} file pairs")
-        
-        print(f"\nTotal organized: {total_organized} hyperspectral image pairs")
+        print(f"\n✅ Organization Results:")
+        print(f"   Healthy images: {results['healthy']}")
+        print(f"   Diseased images: {results['diseased']}")
+        print(f"   Test images (unmatched): {results['test']}")
+        print(f"   Total organized: {results['healthy'] + results['diseased'] + results['test']}")
         
         if results['errors']:
-            print(f"\nErrors encountered: {len(results['errors'])}")
-            for error in results['errors'][:5]:  # Show first 5 errors
-                print(f"  - {error}")
-            if len(results['errors']) > 5:
-                print(f"  ... and {len(results['errors']) - 5} more errors")
-        
-        print(f"\nDirectory structure created:")
-        for class_name, class_dir in self.class_dirs.items():
-            file_count = len(list(class_dir.glob('*.hdr')))
-            print(f"  {class_dir}: {file_count} file pairs")
+            print(f"\n❌ Errors: {len(results['errors'])}")
+            for error in results['errors'][:3]:
+                print(f"   {error}")
+            if len(results['errors']) > 3:
+                print(f"   ... and {len(results['errors']) - 3} more errors")
         
         # Dataset balance analysis
-        class_counts = [results[c] for c in ['healthy', 'diseased'] if results[c] > 0]
-        if class_counts and len(class_counts) > 1:
-            balance_ratio = max(class_counts) / min(class_counts) if min(class_counts) > 0 else float('inf')
-            print(f"\nDataset balance ratio: {balance_ratio:.2f}")
-            if balance_ratio > 3:
-                print("  ⚠️  Dataset is imbalanced - consider data augmentation")
+        if results['healthy'] > 0 and results['diseased'] > 0:
+            balance_ratio = max(results['healthy'], results['diseased']) / min(results['healthy'], results['diseased'])
+            print(f"\n⚖️  Dataset Balance:")
+            print(f"   Balance ratio: {balance_ratio:.2f}")
+            if balance_ratio > 2.0:
+                print("   ⚠️  Dataset is imbalanced - consider data augmentation")
             else:
-                print("  ✅ Dataset is reasonably balanced")
-        else:
-            print("\n⚠️  Not enough classes for balance analysis")
+                print("   ✅ Dataset is well-balanced")
+        
+        print(f"\n📂 Final Dataset Structure:")
+        for class_name, class_dir in self.class_dirs.items():
+            file_count = len(list(class_dir.glob('*.png')))
+            print(f"   {class_dir}/: {file_count} images")
+        
+        print(f"\n🎯 Next Steps:")
+        print("   1. Verify the organized dataset structure")
+        print("   2. Run: python cli.py train --config config.yaml")
+        print("   3. Monitor training progress in organized_dataset/")
 
+    def generate_organization_report(self, metadata: pd.DataFrame, results: Dict):
+        """Generate comprehensive organization report"""
+        print("\n" + "="*60)
+        print("GRAPEVINE DISEASE DATASET ORGANIZATION REPORT")
+        print("="*60)
+        
+        print(f"\n📁 Source PNG Directory: {self.png_source_dir}")
+        print(f"📁 Output Dataset Directory: {self.output_dir}")
+        print(f"📄 Metadata File: {self.metadata_path}")
+        
+        print(f"\n📊 Metadata Statistics:")
+        print(f"   Total metadata entries: {len(metadata)}")
+        
+        if 'symptom' in metadata.columns:
+            symptom_counts = metadata['symptom'].value_counts()
+            print(f"   Symptom distribution:")
+            for symptom, count in symptom_counts.items():
+                classification = self.classify_disease_status(symptom)
+                print(f"     {symptom}: {count} -> {classification}")
+        
+        print(f"\n✅ Organization Results:")
+        print(f"   Healthy images: {results['healthy']}")
+        print(f"   Diseased images: {results['diseased']}")
+        print(f"   Test images (unmatched): {results['test']}")
+        
+        # FIXED: Calculate total organized correctly
+        total_organized = results['healthy'] + results['diseased'] + results['test']
+        print(f"   Total organized: {total_organized}")
+        
+        if results['errors']:
+            print(f"\n❌ Errors: {len(results['errors'])}")
+            for error in results['errors'][:3]:
+                print(f"   {error}")
+            if len(results['errors']) > 3:
+                print(f"   ... and {len(results['errors']) - 3} more errors")
+        
+        # Dataset balance analysis
+        if results['healthy'] > 0 and results['diseased'] > 0:
+            balance_ratio = max(results['healthy'], results['diseased']) / min(results['healthy'], results['diseased'])
+            print(f"\n⚖️  Dataset Balance:")
+            print(f"   Balance ratio: {balance_ratio:.2f}")
+            if balance_ratio > 2.0:
+                print("   ⚠️  Dataset is imbalanced - consider data augmentation")
+            else:
+                print("   ✅ Dataset is well-balanced")
+        
+        print(f"\n📂 Final Dataset Structure:")
+        for class_name, class_dir in self.class_dirs.items():
+            file_count = len(list(class_dir.glob('*.png')))
+            print(f"   {class_dir}/: {file_count} images")
+        
+        print(f"\n🎯 Next Steps:")
+        print("   1. Verify the organized dataset structure")
+        print("   2. Run: python cli.py train --config config.yaml")
+        print("   3. Monitor training progress in organized_dataset/")
 
 def main():
-    """Main function"""
-    parser = argparse.ArgumentParser(description="Organize hyperspectral dataset files")
+    """Main execution function"""
+    parser = argparse.ArgumentParser(
+        description="Organize grapevine disease detection dataset from PNG images",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python organize_dataset.py --png-dir ./raw_png_images --output-dir ./organized_dataset
+  python organize_dataset.py --png-dir ./png_data --output-dir ./training_data --metadata description-2.csv
+        """
+    )
     
-    parser.add_argument('--source-dir', type=str, required=True,
-                       help='Source directory containing raw .hdr/.dat files')
-    parser.add_argument('--output-dir', type=str, default='./organized_data',
-                       help='Output directory for organized files')
-    parser.add_argument('--metadata', type=str, required=True,
-                       help='Path to metadata CSV file')
+    parser.add_argument('--png-dir', type=str, required=True,
+                       help='Directory containing source PNG images')
+    parser.add_argument('--output-dir', type=str, default='./organized_dataset',
+                       help='Output directory for organized dataset')
+    parser.add_argument('--metadata', type=str, default='description-2.csv',
+                       help='Path to metadata CSV file (default: description-2.csv)')
     
     args = parser.parse_args()
     
-    # Check if source directory exists
-    if not Path(args.source_dir).exists():
-        print(f"Error: Source directory does not exist: {args.source_dir}")
-        # List available directories
-        current_dir = Path('.')
-        available_dirs = [d.name for d in current_dir.iterdir() if d.is_dir()]
-        print(f"Available directories: {available_dirs}")
+    # Validate arguments
+    if not Path(args.png_dir).exists():
+        print(f"❌ Error: PNG directory does not exist: {args.png_dir}")
         return
     
-    print("Starting dataset organization...")
+    if not Path(args.metadata).exists():
+        print(f"❌ Error: Metadata file does not exist: {args.metadata}")
+        return
+    
+    print("🚀 Starting grapevine disease dataset organization...")
+    print(f"   Source: {args.png_dir}")
+    print(f"   Output: {args.output_dir}")
+    print(f"   Metadata: {args.metadata}")
     
     try:
         # Initialize organizer
-        organizer = DatasetOrganizer(args.source_dir, args.output_dir)
+        organizer = GrapevineDatasetOrganizer(args.png_dir, args.output_dir, args.metadata)
         
         # Load metadata
-        metadata = organizer.load_metadata(args.metadata)
-        print(f"Loaded metadata for {len(metadata)} samples")
+        metadata = organizer.load_metadata()
+        print(f"✅ Loaded metadata for {len(metadata)} samples")
         
-        # Find hyperspectral files
-        files = organizer.find_hyperspectral_files()
+        # Discover PNG files
+        png_files = organizer.discover_png_files()
+        if not png_files:
+            print("❌ No PNG files found! Check your --png-dir parameter")
+            return
         
-        # Match files with metadata
-        matched_data = organizer.match_files_to_metadata(metadata, files)
+        # Match files to metadata
+        matched_data = organizer.match_images_to_metadata(metadata, png_files)
         
-        # Organize files
-        results = organizer.organize_files(matched_data)
+        # Organize dataset
+        results = organizer.organize_training_data(matched_data)
         
-        # Generate summary report
-        organizer.generate_summary_report(metadata, results)
+        # Generate report
+        organizer.generate_organization_report(metadata, results)
         
-        print(f"\n✅ Dataset organization completed!")
-        print(f"Organized files are in: {args.output_dir}")
+        print(f"\n🎉 Dataset organization completed successfully!")
+        print(f"📁 Organized dataset available at: {args.output_dir}")
         
     except Exception as e:
-        logger.error(f"Error during dataset organization: {e}")
-        # Show current directory contents for debugging
-        current_dir = Path('.')
-        files = [f.name for f in current_dir.iterdir() if f.is_file()]
-        print(f"Files in current directory: {files}")
-        return
-    
-    print(f"\nNext steps:")
-    print("1. Verify the organized data structure")
-    print("2. Proceed with model training using the organized data")
+        logger.error(f"Organization failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

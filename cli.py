@@ -3,10 +3,12 @@
 Command Line Interface for Grapevine Disease Detection System
 ============================================================
 
+Updated for PNG image dataset and simplified workflow.
+
 Usage examples:
-  python cli.py --data-dir ./hyperspectral_data --config config.yaml
-  python cli.py --predict --model-path ./results/random_forest_model.pkl --input spectrum.dat
-  python cli.py --evaluate --config config.yaml --subset 50
+  python cli.py train --config config.yaml
+  python cli.py predict --model ./models/model.pth --image ./test_image.png
+  python cli.py evaluate --model ./models/model.pth --data-dir ./organized_dataset
 """
 
 import os
@@ -16,25 +18,18 @@ import yaml
 import logging
 import pickle
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 import numpy as np
 import pandas as pd
-
-# Import our modules
-from grapevine_disease_detection import (
-    HyperspectralDataLoader, 
-    FeatureExtractor, 
-    ModelTrainer, 
-    Visualizer,
-    save_results
-)
-from data_loader_utils import (
-    DataAugmentation, 
-    AdvancedPreprocessing, 
-    DatasetValidator,
-    batch_load_hyperspectral_data
-)
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms, models
+from PIL import Image
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import seaborn as sns
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +44,7 @@ def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
         format=log_format,
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_file) if log_file else logging.NullHandler()
+            logging.FileHandler(log_file) if log_file else logging.StreamHandler(sys.stdout)
         ]
     )
 
@@ -77,11 +72,205 @@ def validate_paths(config: Dict[str, Any]) -> bool:
         logger.error(f"Data directory does not exist: {data_dir}")
         return False
     
-    # Create output directory if it doesn't exist
-    output_dir = Path(config['data']['output_dir'])
+    # Create output directories if they don't exist
+    output_dir = Path(config['training']['output_dir'])
     output_dir.mkdir(exist_ok=True, parents=True)
     
+    model_dir = Path(config['training']['model_dir'])
+    model_dir.mkdir(exist_ok=True, parents=True)
+    
     return True
+
+
+class GrapevineDataset(Dataset):
+    """PyTorch Dataset for grapevine disease detection"""
+    
+    def __init__(self, data_dir: str, transform=None):
+        self.data_dir = Path(data_dir)
+        self.transform = transform
+        self.classes = sorted([d.name for d in self.data_dir.iterdir() if d.is_dir()])
+        self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
+        self.samples = self._load_samples()
+    
+    def _load_samples(self) -> List[Tuple[str, int]]:
+        samples = []
+        for class_name in self.classes:
+            class_dir = self.data_dir / class_name
+            if class_dir.is_dir():
+                for img_file in class_dir.glob('*.png'):
+                    samples.append((str(img_file), self.class_to_idx[class_name]))
+        return samples
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        img_path, label = self.samples[idx]
+        image = Image.open(img_path).convert('RGB')
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, label
+
+
+class GrapevineDiseaseModel:
+    """CNN Model for grapevine disease detection"""
+    
+    def __init__(self, num_classes: int = 2, model_name: str = 'resnet18'):
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = self._create_model(model_name, num_classes)
+        self.model.to(self.device)
+        
+    def _create_model(self, model_name: str, num_classes: int) -> nn.Module:
+        """Create CNN model"""
+        if model_name == 'resnet18':
+            model = models.resnet18(pretrained=True)
+            model.fc = nn.Linear(model.fc.in_features, num_classes)
+        elif model_name == 'efficientnet':
+            model = models.efficientnet_b0(pretrained=True)
+            model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+        else:  # Simple CNN
+            model = nn.Sequential(
+                nn.Conv2d(3, 32, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Conv2d(32, 64, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Conv2d(64, 128, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Flatten(),
+                nn.Linear(128 * 28 * 28, 512),
+                nn.ReLU(),
+                nn.Dropout(0.5),
+                nn.Linear(512, num_classes)
+            )
+        return model
+    
+    def train(self, train_loader: DataLoader, val_loader: DataLoader, 
+              config: Dict[str, Any]) -> Dict[str, List[float]]:
+        """Train the model"""
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=config['learning_rate'])
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+        
+        history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
+        
+        for epoch in range(config['epochs']):
+            # Training phase
+            self.model.train()
+            train_loss = 0.0
+            train_correct = 0
+            train_total = 0
+            
+            for images, labels in train_loader:
+                images, labels = images.to(self.device), labels.to(self.device)
+                
+                optimizer.zero_grad()
+                outputs = self.model(images)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                
+                train_loss += loss.item()
+                _, predicted = torch.max(outputs.data, 1)
+                train_total += labels.size(0)
+                train_correct += (predicted == labels).sum().item()
+            
+            # Validation phase
+            self.model.eval()
+            val_loss = 0.0
+            val_correct = 0
+            val_total = 0
+            
+            with torch.no_grad():
+                for images, labels in val_loader:
+                    images, labels = images.to(self.device), labels.to(self.device)
+                    outputs = self.model(images)
+                    loss = criterion(outputs, labels)
+                    
+                    val_loss += loss.item()
+                    _, predicted = torch.max(outputs.data, 1)
+                    val_total += labels.size(0)
+                    val_correct += (predicted == labels).sum().item()
+            
+            # Calculate metrics
+            train_acc = 100 * train_correct / train_total
+            val_acc = 100 * val_correct / val_total
+            avg_train_loss = train_loss / len(train_loader)
+            avg_val_loss = val_loss / len(val_loader)
+            
+            history['train_loss'].append(avg_train_loss)
+            history['val_loss'].append(avg_val_loss)
+            history['train_acc'].append(train_acc)
+            history['val_acc'].append(val_acc)
+            
+            logger.info(f'Epoch {epoch+1}/{config["epochs"]}: '
+                       f'Train Loss: {avg_train_loss:.4f}, Train Acc: {train_acc:.2f}%, '
+                       f'Val Loss: {avg_val_loss:.4f}, Val Acc: {val_acc:.2f}%')
+            
+            scheduler.step()
+        
+        return history
+    
+    def predict(self, image: Image.Image) -> Tuple[str, float]:
+        """Make prediction on a single image"""
+        self.model.eval()
+        
+        # Preprocess image
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        image_tensor = transform(image).unsqueeze(0).to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model(image_tensor)
+            probabilities = torch.softmax(outputs, dim=1)
+            confidence, predicted = torch.max(probabilities, 1)
+        
+        class_name = 'healthy' if predicted.item() == 0 else 'diseased'
+        return class_name, confidence.item()
+    
+    def evaluate(self, test_loader: DataLoader) -> Dict[str, float]:
+        """Evaluate model on test data"""
+        self.model.eval()
+        all_preds = []
+        all_labels = []
+        
+        with torch.no_grad():
+            for images, labels in test_loader:
+                images, labels = images.to(self.device), labels.to(self.device)
+                outputs = self.model(images)
+                _, predicted = torch.max(outputs.data, 1)
+                
+                all_preds.extend(predicted.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+        
+        accuracy = accuracy_score(all_labels, all_preds)
+        report = classification_report(all_labels, all_preds, target_names=['healthy', 'diseased'])
+        
+        return {
+            'accuracy': accuracy,
+            'report': report,
+            'predictions': all_preds,
+            'labels': all_labels
+        }
+    
+    def save(self, path: str):
+        """Save model weights"""
+        torch.save(self.model.state_dict(), path)
+        logger.info(f"Model saved to {path}")
+    
+    def load(self, path: str):
+        """Load model weights"""
+        self.model.load_state_dict(torch.load(path, map_location=self.device))
+        self.model.eval()
+        logger.info(f"Model loaded from {path}")
 
 
 class CLICommands:
@@ -90,330 +279,218 @@ class CLICommands:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         
-        # Initialize components
-        self.data_loader = HyperspectralDataLoader(config['data']['data_dir'])
-        self.feature_extractor = FeatureExtractor()
-        self.model_trainer = ModelTrainer()
-        self.visualizer = Visualizer()
-        self.augmentation = DataAugmentation()
-        self.preprocessor = AdvancedPreprocessing()
-        self.validator = DatasetValidator()
-    
-    def train(self, subset_size: Optional[int] = None) -> Dict[str, Any]:
-        """Train models using the configuration"""
+    def train(self) -> Dict[str, Any]:
+        """Train the grapevine disease detection model"""
         logger.info("Starting training pipeline...")
         
-        # Step 1: Load data
-        logger.info("Loading hyperspectral data...")
+        # Data transformations
+        train_transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
         
+        val_transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        # Create datasets
+        train_dataset = GrapevineDataset(
+            self.config['data']['data_dir'], 
+            transform=train_transform
+        )
+        
+        # Split into train/val
+        train_size = int(0.8 * len(train_dataset))
+        val_size = len(train_dataset) - train_size
+        train_subset, val_subset = torch.utils.data.random_split(
+            train_dataset, [train_size, val_size]
+        )
+        
+        # Create data loaders
+        train_loader = DataLoader(
+            train_subset, 
+            batch_size=self.config['training']['batch_size'], 
+            shuffle=True,
+            num_workers=2
+        )
+        
+        val_loader = DataLoader(
+            val_subset, 
+            batch_size=self.config['training']['batch_size'], 
+            shuffle=False,
+            num_workers=2
+        )
+        
+        logger.info(f"Training on {len(train_subset)} samples, validating on {len(val_subset)} samples")
+        logger.info(f"Classes: {train_dataset.classes}")
+        
+        # Initialize and train model
+        model = GrapevineDiseaseModel(
+            num_classes=len(train_dataset.classes),
+            model_name=self.config['model']['architecture']
+        )
+        
+        history = model.train(train_loader, val_loader, self.config['training'])
+        
+        # Save model
+        model_path = Path(self.config['training']['model_dir']) / 'grapevine_model.pth'
+        model.save(str(model_path))
+        
+        # Save class mapping
+        class_mapping = {
+            'classes': train_dataset.classes,
+            'class_to_idx': train_dataset.class_to_idx
+        }
+        
+        mapping_path = Path(self.config['training']['model_dir']) / 'class_mapping.pkl'
+        with open(mapping_path, 'wb') as f:
+            pickle.dump(class_mapping, f)
+        
+        # Generate training plots
+        self._plot_training_history(history)
+        
+        return {
+            'model_path': str(model_path),
+            'mapping_path': str(mapping_path),
+            'history': history,
+            'classes': train_dataset.classes
+        }
+    
+    def predict(self, model_path: str, image_path: str) -> str:
+        """Make prediction on a single image"""
+        logger.info(f"Making prediction on {image_path}")
+        
+        # Load class mapping
+        mapping_path = Path(model_path).parent / 'class_mapping.pkl'
+        with open(mapping_path, 'rb') as f:
+            class_mapping = pickle.load(f)
+        
+        # Load model
+        model = GrapevineDiseaseModel(num_classes=len(class_mapping['classes']))
+        model.load(model_path)
+        
+        # Load and preprocess image
         try:
-            # Try to load real data first
-            X, y = batch_load_hyperspectral_data(
-                self.config['data']['data_dir'],
-                self.config['data']['file_patterns']['header_files']
-            )
+            image = Image.open(image_path).convert('RGB')
+            prediction, confidence = model.predict(image)
             
-            if len(X) == 0:
-                logger.warning("No real data found. Generating synthetic data...")
-                X, y = self._generate_synthetic_data()
+            return (f"Prediction: {prediction} "
+                   f"(confidence: {confidence:.3f})")
         
         except Exception as e:
-            logger.warning(f"Failed to load real data: {e}. Using synthetic data.")
-            X, y = self._generate_synthetic_data()
+            logger.error(f"Error processing image: {e}")
+            return f"Error: {str(e)}"
+    
+    def evaluate(self, model_path: str, data_dir: str) -> Dict[str, Any]:
+        """Evaluate model on test data"""
+        logger.info(f"Evaluating model on {data_dir}")
         
-        # Apply subset if requested
-        if subset_size is not None and subset_size < len(X):
-            logger.info(f"Using subset of {subset_size} samples")
-            indices = np.random.choice(len(X), subset_size, replace=False)
-            X = X[indices]
-            y = [y[i] for i in indices]
+        # Load class mapping
+        mapping_path = Path(model_path).parent / 'class_mapping.pkl'
+        with open(mapping_path, 'rb') as f:
+            class_mapping = pickle.load(f)
         
-        # Step 2: Data validation
-        if self.config['data']['validate_data']:
-            logger.info("Validating dataset...")
-            report = self.validator.generate_quality_report(X, y)
-            print("\n" + report)
+        # Load model
+        model = GrapevineDiseaseModel(num_classes=len(class_mapping['classes']))
+        model.load(model_path)
         
-        # Step 3: Preprocessing
-        logger.info("Preprocessing data...")
-        X_processed = self.preprocessor.apply_preprocessing_pipeline(
-            X, self.config['preprocessing']['pipeline']
+        # Create test dataset
+        test_transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        test_dataset = GrapevineDataset(data_dir, transform=test_transform)
+        test_loader = DataLoader(
+            test_dataset, 
+            batch_size=self.config['training']['batch_size'], 
+            shuffle=False,
+            num_workers=2
         )
         
-        # Step 4: Data augmentation
-        if self.config['data']['augmentation']['enabled']:
-            logger.info("Applying data augmentation...")
-            X_processed, y = self.augmentation.augment_dataset(
-                X_processed, y, self.config['data']['augmentation']['factor']
-            )
+        # Evaluate
+        results = model.evaluate(test_loader)
         
-        # Step 5: Feature extraction
-        logger.info("Extracting features...")
-        features = self._extract_features(X_processed)
-        
-        # Step 6: Dimensionality reduction
-        if self.config['preprocessing']['pca']['enabled']:
-            logger.info("Applying dimensionality reduction...")
-            features = self.feature_extractor.apply_dimensionality_reduction(
-                features, self.config['preprocessing']['pca']['n_components']
-            )
-        
-        # Step 7: Prepare data for training
-        logger.info("Preparing data for training...")
-        X_train, X_val, X_test, y_train, y_val, y_test = self.model_trainer.prepare_data(
-            features, y, self.config['training']['test_size']
+        # Plot confusion matrix
+        self._plot_confusion_matrix(
+            results['labels'], 
+            results['predictions'], 
+            class_mapping['classes']
         )
         
-        # Step 8: Train models
-        results = {}
-        
-        # Random Forest
-        if self.config['models']['random_forest']['enabled']:
-            logger.info("Training Random Forest...")
-            rf_params = {k: v for k, v in self.config['models']['random_forest'].items() 
-                        if k != 'enabled'}
-            self.model_trainer.train_random_forest(X_train, y_train, **rf_params)
-            results['random_forest'] = self.model_trainer.evaluate_model(
-                'random_forest', X_test, y_test
-            )
-        
-        # SVM
-        if self.config['models']['svm']['enabled']:
-            logger.info("Training SVM...")
-            svm_params = {k: v for k, v in self.config['models']['svm'].items() 
-                         if k != 'enabled'}
-            self.model_trainer.train_svm(X_train, y_train, **svm_params)
-            results['svm'] = self.model_trainer.evaluate_model('svm', X_test, y_test)
-        
-        # CNN
-        if self.config['models']['cnn']['enabled']:
-            logger.info("Training CNN...")
-            cnn_params = {k: v for k, v in self.config['models']['cnn'].items() 
-                         if k != 'enabled'}
-            self.model_trainer.train_cnn(X_train, y_train, X_val, y_val, **cnn_params)
-            results['cnn'] = self.model_trainer.evaluate_model('cnn', X_test, y_test)
-        
-        # Step 9: Generate visualizations
-        if self.config['visualization']['enabled']:
-            logger.info("Generating visualizations...")
-            self._generate_visualizations(X_processed, y, results)
-        
-        # Step 10: Save results
-        logger.info("Saving results...")
-        save_results(results, self.model_trainer, self.config['data']['output_dir'])
+        logger.info(f"Evaluation accuracy: {results['accuracy']:.4f}")
+        logger.info("Classification Report:\n" + results['report'])
         
         return results
     
-    def predict(self, model_path: str, input_path: str, model_type: str = 'random_forest') -> str:
-        """Make prediction on new data"""
-        logger.info(f"Loading model from {model_path}")
+    def _plot_training_history(self, history: Dict[str, List[float]]):
+        """Plot training history"""
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
         
-        # Load model
-        try:
-            if model_type == 'cnn':
-                import tensorflow as tf
-                model = tf.keras.models.load_model(model_path)
-            else:
-                with open(model_path, 'rb') as f:
-                    model = pickle.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            return "Error loading model"
+        # Plot loss
+        ax1.plot(history['train_loss'], label='Train Loss')
+        ax1.plot(history['val_loss'], label='Validation Loss')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+        ax1.set_title('Training and Validation Loss')
+        ax1.legend()
+        ax1.grid(True)
         
-        # Load label encoder
-        label_encoder_path = Path(model_path).parent / "label_encoder.pkl"
-        try:
-            with open(label_encoder_path, 'rb') as f:
-                label_encoder = pickle.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load label encoder: {e}")
-            return "Error loading label encoder"
+        # Plot accuracy
+        ax2.plot(history['train_acc'], label='Train Accuracy')
+        ax2.plot(history['val_acc'], label='Validation Accuracy')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Accuracy (%)')
+        ax2.set_title('Training and Validation Accuracy')
+        ax2.legend()
+        ax2.grid(True)
         
-        # Load and preprocess input
-        try:
-            if input_path.endswith('.dat') or input_path.endswith('.hdr'):
-                # Hyperspectral image
-                img_array = self.data_loader.load_envi_image(input_path)
-                if img_array is None:
-                    return "Error loading hyperspectral image"
-                
-                # Extract spectrum
-                if len(img_array.shape) == 3:
-                    spectrum = np.mean(img_array.reshape(-1, img_array.shape[-1]), axis=0)
-                else:
-                    spectrum = img_array
-            else:
-                # Assume it's a spectrum file
-                spectrum = np.loadtxt(input_path)
-            
-            # Preprocess
-            spectrum_processed = self.preprocessor.apply_preprocessing_pipeline(
-                spectrum.reshape(1, -1), self.config['preprocessing']['pipeline']
-            )
-            
-            # Extract features
-            features = self._extract_features(spectrum_processed)
-            
-            # Apply PCA if used during training
-            if self.config['preprocessing']['pca']['enabled']:
-                features = self.feature_extractor.apply_dimensionality_reduction(features)
-            
-            # Make prediction
-            if model_type == 'cnn':
-                features_reshaped = features.reshape(features.shape[0], features.shape[1], 1)
-                prediction_proba = model.predict(features_reshaped)
-                prediction = np.argmax(prediction_proba, axis=1)
-            else:
-                prediction = model.predict(features)
-            
-            # Convert to label
-            predicted_label = label_encoder.inverse_transform(prediction)[0]
-            
-            # Get confidence if available
-            if hasattr(model, 'predict_proba'):
-                confidence = np.max(model.predict_proba(features))
-                return f"Prediction: {predicted_label} (confidence: {confidence:.3f})"
-            else:
-                return f"Prediction: {predicted_label}"
+        plt.tight_layout()
+        plot_path = Path(self.config['training']['output_dir']) / 'training_history.png'
+        plt.savefig(plot_path)
+        plt.close()
         
-        except Exception as e:
-            logger.error(f"Error during prediction: {e}")
-            return f"Error during prediction: {e}"
+        logger.info(f"Training plots saved to {plot_path}")
     
-    def evaluate(self, model_path: str, test_data_dir: str) -> Dict[str, float]:
-        """Evaluate a trained model on test data"""
-        logger.info("Evaluating model...")
+    def _plot_confusion_matrix(self, y_true, y_pred, class_names):
+        """Plot confusion matrix"""
+        cm = confusion_matrix(y_true, y_pred)
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                   xticklabels=class_names, yticklabels=class_names)
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.title('Confusion Matrix')
         
-        # Load test data
-        X_test, y_test = batch_load_hyperspectral_data(test_data_dir)
+        plot_path = Path(self.config['training']['output_dir']) / 'confusion_matrix.png'
+        plt.savefig(plot_path)
+        plt.close()
         
-        if len(X_test) == 0:
-            logger.error("No test data found")
-            return {}
-        
-        # Preprocess test data
-        X_test_processed = self.preprocessor.apply_preprocessing_pipeline(
-            X_test, self.config['preprocessing']['pipeline']
-        )
-        
-        # Extract features
-        features = self._extract_features(X_test_processed)
-        
-        # Apply PCA
-        if self.config['preprocessing']['pca']['enabled']:
-            features = self.feature_extractor.apply_dimensionality_reduction(features)
-        
-        # Load model and make predictions
-        # Implementation depends on model type
-        # This is a simplified version
-        
-        return {"accuracy": 0.0, "f1_score": 0.0}  # Placeholder
-    
-    def _generate_synthetic_data(self) -> tuple:
-        """Generate synthetic hyperspectral data for testing"""
-        logger.info("Generating synthetic hyperspectral data...")
-        
-        n_samples_per_class = 20
-        n_bands = 100
-        wavelengths = np.linspace(400, 1000, n_bands)
-        
-        X_synthetic = []
-        y_synthetic = []
-        
-        for class_name in ['healthy', 'biotic', 'abiotic']:
-            for i in range(n_samples_per_class):
-                # Generate base spectrum
-                spectrum = np.random.normal(0.3, 0.1, n_bands)
-                
-                # Add class-specific characteristics
-                if class_name == 'healthy':
-                    # Higher NIR reflectance
-                    nir_region = (wavelengths > 750) & (wavelengths < 900)
-                    spectrum[nir_region] += np.random.normal(0.4, 0.1, np.sum(nir_region))
-                elif class_name == 'biotic':
-                    # Disease signatures
-                    red_region = (wavelengths > 650) & (wavelengths < 700)
-                    spectrum[red_region] += np.random.normal(0.2, 0.05, np.sum(red_region))
-                else:  # abiotic
-                    # Stress signatures
-                    spectrum *= 0.7
-                
-                # Ensure non-negative values
-                spectrum = np.maximum(0, spectrum + np.random.normal(0, 0.02, n_bands))
-                
-                X_synthetic.append(spectrum)
-                y_synthetic.append(class_name)
-        
-        return np.array(X_synthetic), y_synthetic
-    
-    def _extract_features(self, X: np.ndarray) -> np.ndarray:
-        """Extract features from preprocessed spectra"""
-        features_list = []
-        wavelengths = np.linspace(400, 1000, X.shape[1])
-        
-        for spectrum in X:
-            # Basic spectral features
-            spectral_features = spectrum
-            
-            # Vegetation indices if enabled
-            if self.config['features']['vegetation_indices']:
-                veg_indices = self.feature_extractor.compute_vegetation_indices(
-                    spectrum, wavelengths
-                )
-                combined_features = np.concatenate([
-                    spectral_features,
-                    list(veg_indices.values())
-                ])
-            else:
-                combined_features = spectral_features
-            
-            features_list.append(combined_features)
-        
-        return np.array(features_list)
-    
-    def _generate_visualizations(self, X: np.ndarray, y: List[str], results: Dict):
-        """Generate all configured visualizations"""
-        class_names = list(set(y))
-        
-        # Mean spectral signatures
-        if self.config['visualization']['plots']['spectral_signatures']:
-            mean_spectra = {}
-            for class_name in class_names:
-                class_mask = np.array(y) == class_name
-                mean_spectra[class_name] = np.mean(X[class_mask], axis=0)
-            
-            self.visualizer.plot_spectral_signatures(mean_spectra)
-        
-        # Confusion matrices
-        if self.config['visualization']['plots']['confusion_matrices']:
-            for model_name, result in results.items():
-                self.visualizer.plot_confusion_matrix(
-                    result['confusion_matrix'], 
-                    class_names, 
-                    model_name.title()
-                )
-        
-        # Add other visualization calls as needed
+        logger.info(f"Confusion matrix saved to {plot_path}")
 
 
 def main():
     """Main CLI function"""
     parser = argparse.ArgumentParser(
-        description="Grapevine Disease Detection System",
+        description="Grapevine Disease Detection System - PNG Image Classification",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Train models with default config
+  # Train model with default config
   python cli.py train --config config.yaml
   
-  # Train with custom data directory
-  python cli.py train --data-dir ./my_data --config config.yaml
+  # Make prediction on single image
+  python cli.py predict --model ./models/grapevine_model.pth --image ./test_image.png
   
-  # Make prediction
-  python cli.py predict --model ./results/random_forest_model.pkl --input spectrum.dat
-  
-  # Evaluate model
-  python cli.py evaluate --model ./results/svm_model.pkl --test-data ./test_data
+  # Evaluate model on test data
+  python cli.py evaluate --model ./models/grapevine_model.pth --data-dir ./test_data
         """
     )
     
@@ -422,37 +499,25 @@ Examples:
                        help='Path to configuration file (default: config.yaml)')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose logging')
-    parser.add_argument('--log-file', type=str,
-                       help='Path to log file')
     
     # Subcommands
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
     # Train command
-    train_parser = subparsers.add_parser('train', help='Train models')
-    train_parser.add_argument('--data-dir', type=str,
-                             help='Override data directory from config')
-    train_parser.add_argument('--output-dir', type=str,
-                             help='Override output directory from config')
-    train_parser.add_argument('--subset', type=int,
-                             help='Use only a subset of data (for testing)')
+    train_parser = subparsers.add_parser('train', help='Train the model')
     
     # Predict command
-    predict_parser = subparsers.add_parser('predict', help='Make prediction')
+    predict_parser = subparsers.add_parser('predict', help='Make prediction on an image')
     predict_parser.add_argument('--model', type=str, required=True,
                                help='Path to trained model file')
-    predict_parser.add_argument('--input', type=str, required=True,
-                               help='Path to input spectrum/image file')
-    predict_parser.add_argument('--model-type', type=str, 
-                               choices=['random_forest', 'svm', 'cnn'],
-                               default='random_forest',
-                               help='Type of model (default: random_forest)')
+    predict_parser.add_argument('--image', type=str, required=True,
+                               help='Path to input image file')
     
     # Evaluate command
-    evaluate_parser = subparsers.add_parser('evaluate', help='Evaluate model')
+    evaluate_parser = subparsers.add_parser('evaluate', help='Evaluate model on test data')
     evaluate_parser.add_argument('--model', type=str, required=True,
                                 help='Path to trained model file')
-    evaluate_parser.add_argument('--test-data', type=str, required=True,
+    evaluate_parser.add_argument('--data-dir', type=str, required=True,
                                 help='Path to test data directory')
     
     # Parse arguments
@@ -464,16 +529,10 @@ Examples:
     
     # Setup logging
     log_level = "DEBUG" if args.verbose else "INFO"
-    setup_logging(log_level, args.log_file)
+    setup_logging(log_level)
     
     # Load configuration
     config = load_config(args.config)
-    
-    # Override config with CLI arguments
-    if hasattr(args, 'data_dir') and args.data_dir:
-        config['data']['data_dir'] = args.data_dir
-    if hasattr(args, 'output_dir') and args.output_dir:
-        config['data']['output_dir'] = args.output_dir
     
     # Validate paths
     if not validate_paths(config):
@@ -485,25 +544,19 @@ Examples:
     try:
         # Execute command
         if args.command == 'train':
-            results = cli.train(subset_size=getattr(args, 'subset', None))
-            print("\nTraining completed successfully!")
+            results = cli.train()
+            print("\n✅ Training completed successfully!")
+            print(f"Model saved to: {results['model_path']}")
             
-            # Print summary
-            print("\n" + "="*50)
-            print("TRAINING RESULTS SUMMARY")
-            print("="*50)
-            for model_name, result in results.items():
-                print(f"\n{model_name.upper()}:")
-                print(f"  Accuracy: {result['accuracy']:.4f}")
-                print(f"  F1-Score: {result['f1_score']:.4f}")
-        
         elif args.command == 'predict':
-            prediction = cli.predict(args.model, args.input, args.model_type)
+            prediction = cli.predict(args.model, args.image)
             print(f"\n{prediction}")
-        
+            
         elif args.command == 'evaluate':
-            results = cli.evaluate(args.model, args.test_data)
-            print(f"\nEvaluation results: {results}")
+            results = cli.evaluate(args.model, args.data_dir)
+            print(f"\nEvaluation Accuracy: {results['accuracy']:.4f}")
+            print("\nClassification Report:")
+            print(results['report'])
     
     except KeyboardInterrupt:
         logger.info("Operation interrupted by user")
