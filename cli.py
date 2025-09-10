@@ -7,8 +7,8 @@ Updated for PNG image dataset and simplified workflow.
 
 Usage examples:
   python cli.py train --config config.yaml
-  python cli.py predict --model ./models/model.pth --image ./test_image.png
-  python cli.py evaluate --model ./models/model.pth --data-dir ./organized_dataset
+  python cli.py predict --model ./models/grapevine_model.pth --image ./organized_dataset/test/[IMAGE_NAME]
+  python cli.py evaluate --model ./models/grapevine_model.pth --data-dir ./organized_dataset
 """
 
 import os
