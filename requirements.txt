@@ -1,4 +1,4 @@
-# Core Requirements - Let pip choose compatible versions
+# Core Requirements
 torch
 torchvision
 numpy
@@ -9,7 +9,14 @@ seaborn
 Pillow
 tqdm
 
+# Hyperspectral Processing
+spectral
+h5py
+scipy
+opencv-python
+results
+
 # Utilities
 python-dotenv
 pyyaml
-opencv-python
+joblib
