@@ -1,4 +1,3 @@
-# Core Requirements - Let pip choose compatible versions
 torch
 torchvision
 numpy
@@ -9,7 +8,6 @@ seaborn
 Pillow
 tqdm
 
-# Utilities
 python-dotenv
 pyyaml
 opencv-python
