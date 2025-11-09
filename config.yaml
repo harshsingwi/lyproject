@@ -11,14 +11,14 @@ data:
 model:
   architecture: "resnet18"
   use_pretrained: true
-  num_classes: 2
+  num_classes: 3  # Changed from 2 to 3 for diseased, healthy, test
 
 # Training Configuration
 training:
   model_dir: "./models"
   output_dir: "./results"
   batch_size: 32
-  epochs: 50
+  epochs: 5
   learning_rate: 0.001
   optimizer: "adam"
   

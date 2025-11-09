@@ -77,49 +77,6 @@ class GrapevineDatasetOrganizer:
                     continue
         
         raise ValueError("Could not parse metadata file with any delimiter or encoding")
-        """Classify symptom into disease categories for grapevines"""
-        if pd.isna(symptom) or not isinstance(symptom, str):
-            return 'test'
-            
-        symptom_lower = symptom.lower().strip()
-        
-        # Handle common encoding issues
-        symptom_lower = (symptom_lower
-                        .replace('@', 'é')
-                        .replace('?', 'é')
-                        .replace('é', 'é')  # Different é encoding
-                        .replace('Ã©', 'é'))  # UTF-8 mishandling
-        
-        # Healthy classifications
-        healthy_patterns = [
-            'healthy', 'ok', 'normal', 'sain', 'saine', 
-            'bon état', 'good condition', 'no symptoms'
-        ]
-        
-        # Disease patterns (common grapevine diseases)
-        disease_patterns = [
-            'flavescence', 'dorée', 'doree', 'fd', 'golden flavescence',
-            'treehopper', 'leafhopper', 'cicadelle',
-            'mildew', 'downy mildew', 'powdery mildew',
-            'esca', 'black measles', 'black dead arm',
-            'botrytis', 'grey rot', 'bunch rot',
-            'eutypa', 'dieback', 'dead arm',
-            'phomopsis', 'cane and leaf spot',
-            'black rot', 'anthracnose',
-            'virus', 'leafroll', 'fanleaf',
-            'deficiency', 'chlorosis', 'nutritional',
-            'stress', 'water stress', 'drought',
-            'damaged', 'injury', 'wound',
-            'wood diseases', 'trunk diseases'
-        ]
-        
-        if any(pattern in symptom_lower for pattern in healthy_patterns):
-            return 'healthy'
-        elif any(pattern in symptom_lower for pattern in disease_patterns):
-            return 'diseased'
-        else:
-            logger.warning(f"Unknown symptom pattern: '{symptom}' -> classifying as 'test'")
-            return 'test'
 
     def classify_disease_status(self, symptom: str) -> str:
         """Classify symptom into disease categories for grapevines"""
@@ -349,57 +306,6 @@ class GrapevineDatasetOrganizer:
                 results['errors'].append(error_msg)
         
         return results
-        """Generate comprehensive organization report"""
-        print("\n" + "="*60)
-        print("GRAPEVINE DISEASE DATASET ORGANIZATION REPORT")
-        print("="*60)
-        
-        print(f"\n📁 Source PNG Directory: {self.png_source_dir}")
-        print(f"📁 Output Dataset Directory: {self.output_dir}")
-        print(f"📄 Metadata File: {self.metadata_path}")
-        
-        print(f"\n📊 Metadata Statistics:")
-        print(f"   Total metadata entries: {len(metadata)}")
-        
-        if 'symptom' in metadata.columns:
-            symptom_counts = metadata['symptom'].value_counts()
-            print(f"   Symptom distribution:")
-            for symptom, count in symptom_counts.items():
-                classification = self.classify_disease_status(symptom)
-                print(f"     {symptom}: {count} -> {classification}")
-        
-        print(f"\n✅ Organization Results:")
-        print(f"   Healthy images: {results['healthy']}")
-        print(f"   Diseased images: {results['diseased']}")
-        print(f"   Test images (unmatched): {results['test']}")
-        print(f"   Total organized: {results['healthy'] + results['diseased'] + results['test']}")
-        
-        if results['errors']:
-            print(f"\n❌ Errors: {len(results['errors'])}")
-            for error in results['errors'][:3]:
-                print(f"   {error}")
-            if len(results['errors']) > 3:
-                print(f"   ... and {len(results['errors']) - 3} more errors")
-        
-        # Dataset balance analysis
-        if results['healthy'] > 0 and results['diseased'] > 0:
-            balance_ratio = max(results['healthy'], results['diseased']) / min(results['healthy'], results['diseased'])
-            print(f"\n⚖️  Dataset Balance:")
-            print(f"   Balance ratio: {balance_ratio:.2f}")
-            if balance_ratio > 2.0:
-                print("   ⚠️  Dataset is imbalanced - consider data augmentation")
-            else:
-                print("   ✅ Dataset is well-balanced")
-        
-        print(f"\n📂 Final Dataset Structure:")
-        for class_name, class_dir in self.class_dirs.items():
-            file_count = len(list(class_dir.glob('*.png')))
-            print(f"   {class_dir}/: {file_count} images")
-        
-        print(f"\n🎯 Next Steps:")
-        print("   1. Verify the organized dataset structure")
-        print("   2. Run: python cli.py train --config config.yaml")
-        print("   3. Monitor training progress in organized_dataset/")
 
     def generate_organization_report(self, metadata: pd.DataFrame, results: Dict):
         """Generate comprehensive organization report"""
@@ -438,90 +344,101 @@ class GrapevineDatasetOrganizer:
                 print(f"   ... and {len(results['errors']) - 3} more errors")
         
         # Dataset balance analysis
-        if results['healthy'] > 0 and results['diseased'] > 0:
-            balance_ratio = max(results['healthy'], results['diseased']) / min(results['healthy'], results['diseased'])
-            print(f"\n⚖️  Dataset Balance:")
-            print(f"   Balance ratio: {balance_ratio:.2f}")
-            if balance_ratio > 2.0:
-                print("   ⚠️  Dataset is imbalanced - consider data augmentation")
-            else:
-                print("   ✅ Dataset is well-balanced")
+        print(f"\n⚖️  Dataset Balance:")
+        total_labeled = results['healthy'] + results['diseased']
+        if total_labeled > 0:
+            healthy_percent = (results['healthy'] / total_labeled) * 100
+            diseased_percent = (results['diseased'] / total_labeled) * 100
+            print(f"   Healthy: {healthy_percent:.1f}% ({results['healthy']})")
+            print(f"   Diseased: {diseased_percent:.1f}% ({results['diseased']})")
         
-        print(f"\n📂 Final Dataset Structure:")
+        print(f"\n📂 Dataset Structure:")
         for class_name, class_dir in self.class_dirs.items():
-            file_count = len(list(class_dir.glob('*.png')))
-            print(f"   {class_dir}/: {file_count} images")
+            class_count = len(list(class_dir.glob('*.png')))
+            print(f"   {class_dir.name}: {class_count} images")
         
-        print(f"\n🎯 Next Steps:")
-        print("   1. Verify the organized dataset structure")
-        print("   2. Run: python cli.py train --config config.yaml")
-        print("   3. Monitor training progress in organized_dataset/")
+        print(f"\n🎯 Next steps:")
+        print("   1. Review the dataset structure")
+        print("   2. Verify image classifications")
+        print("   3. Run training: python cli.py train --config config.yaml")
+        print("="*60)
+
+    def run_organization(self):
+        """Main organization workflow"""
+        logger.info("Starting dataset organization...")
+        
+        # Load metadata
+        metadata = self.load_metadata()
+        
+        # Discover PNG files
+        png_files = self.discover_png_files()
+        
+        if not png_files:
+            logger.error("No PNG files found in source directory")
+            return
+        
+        # Match files to metadata
+        matched_data = self.match_images_to_metadata(metadata, png_files)
+        
+        # Organize files
+        results = self.organize_training_data(matched_data)
+        
+        # Generate report
+        self.generate_organization_report(metadata, results)
+        
+        logger.info("Dataset organization completed!")
+
 
 def main():
-    """Main execution function"""
+    """Main function for dataset organization"""
     parser = argparse.ArgumentParser(
         description="Organize grapevine disease detection dataset from PNG images",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Basic usage with default metadata
   python organize_dataset.py --png-dir ./raw_png_images --output-dir ./organized_dataset
-  python organize_dataset.py --png-dir ./png_data --output-dir ./training_data --metadata description-2.csv
+  
+  # Specify custom metadata file
+  python organize_dataset.py --png-dir ./raw_png_images --output-dir ./organized_dataset --metadata description-2.csv
+  
+  # Verbose output for debugging
+  python organize_dataset.py --png-dir ./raw_png_images --output-dir ./organized_dataset --verbose
         """
     )
     
     parser.add_argument('--png-dir', type=str, required=True,
-                       help='Directory containing source PNG images')
-    parser.add_argument('--output-dir', type=str, default='./organized_dataset',
+                       help='Directory containing PNG image files')
+    parser.add_argument('--output-dir', type=str, required=True,
                        help='Output directory for organized dataset')
     parser.add_argument('--metadata', type=str, default='description-2.csv',
                        help='Path to metadata CSV file (default: description-2.csv)')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='Enable verbose logging for debugging')
     
     args = parser.parse_args()
     
-    # Validate arguments
-    if not Path(args.png_dir).exists():
-        print(f"❌ Error: PNG directory does not exist: {args.png_dir}")
-        return
-    
-    if not Path(args.metadata).exists():
-        print(f"❌ Error: Metadata file does not exist: {args.metadata}")
-        return
-    
-    print("🚀 Starting grapevine disease dataset organization...")
-    print(f"   Source: {args.png_dir}")
-    print(f"   Output: {args.output_dir}")
-    print(f"   Metadata: {args.metadata}")
+    # Set logging level
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
     
     try:
         # Initialize organizer
-        organizer = GrapevineDatasetOrganizer(args.png_dir, args.output_dir, args.metadata)
+        organizer = GrapevineDatasetOrganizer(
+            png_source_dir=args.png_dir,
+            output_dir=args.output_dir,
+            metadata_path=args.metadata
+        )
         
-        # Load metadata
-        metadata = organizer.load_metadata()
-        print(f"✅ Loaded metadata for {len(metadata)} samples")
-        
-        # Discover PNG files
-        png_files = organizer.discover_png_files()
-        if not png_files:
-            print("❌ No PNG files found! Check your --png-dir parameter")
-            return
-        
-        # Match files to metadata
-        matched_data = organizer.match_images_to_metadata(metadata, png_files)
-        
-        # Organize dataset
-        results = organizer.organize_training_data(matched_data)
-        
-        # Generate report
-        organizer.generate_organization_report(metadata, results)
-        
-        print(f"\n🎉 Dataset organization completed successfully!")
-        print(f"📁 Organized dataset available at: {args.output_dir}")
+        # Run organization
+        organizer.run_organization()
         
     except Exception as e:
-        logger.error(f"Organization failed: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error during dataset organization: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        exit(1)
 
 
 if __name__ == "__main__":

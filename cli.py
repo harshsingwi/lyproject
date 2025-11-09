@@ -7,8 +7,8 @@ Updated for PNG image dataset and simplified workflow.
 
 Usage examples:
   python cli.py train --config config.yaml
-  python cli.py predict --model ./models/model.pth --image ./test_image.png
-  python cli.py evaluate --model ./models/model.pth --data-dir ./organized_dataset
+  python cli.py predict --model ./models/grapevine_model.pth --image ./organized_dataset/test/[IMAGE_NAME]
+  python cli.py evaluate --model ./models/grapevine_model.pth --data-dir ./organized_dataset
 """
 
 import os
@@ -30,6 +30,14 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import seaborn as sns
+
+try:
+    from hyperspectral_processor import HyperspectralProcessor
+    from main_hyperspectral import HyperspectralModelTrainer
+    HYPERSPECTRAL_AVAILABLE = True
+except ImportError:
+    HYPERSPECTRAL_AVAILABLE = False
+    print("Hyperspectral processing not available. Install required packages.")
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +96,7 @@ class GrapevineDataset(Dataset):
     def __init__(self, data_dir: str, transform=None):
         self.data_dir = Path(data_dir)
         self.transform = transform
-        self.classes = sorted([d.name for d in self.data_dir.iterdir() if d.is_dir()])
+        self.classes = sorted([d.name for d in self.data_dir.iterdir() if d.is_dir() and d.name in ['healthy', 'diseased', 'test']])
         self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
         self.samples = self._load_samples()
     
@@ -117,7 +125,7 @@ class GrapevineDataset(Dataset):
 class GrapevineDiseaseModel:
     """CNN Model for grapevine disease detection"""
     
-    def __init__(self, num_classes: int = 2, model_name: str = 'resnet18'):
+    def __init__(self, num_classes: int = 3, model_name: str = 'resnet18'):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = self._create_model(model_name, num_classes)
         self.model.to(self.device)
@@ -233,7 +241,9 @@ class GrapevineDiseaseModel:
             probabilities = torch.softmax(outputs, dim=1)
             confidence, predicted = torch.max(probabilities, 1)
         
-        class_name = 'healthy' if predicted.item() == 0 else 'diseased'
+        # Map prediction to class name
+        class_names = ['diseased', 'healthy', 'test']
+        class_name = class_names[predicted.item()]
         return class_name, confidence.item()
     
     def evaluate(self, test_loader: DataLoader) -> Dict[str, float]:
@@ -251,14 +261,31 @@ class GrapevineDiseaseModel:
                 all_preds.extend(predicted.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
         
+        # Get the actual number of classes from the model
+        num_classes = self.model.fc.out_features if hasattr(self.model, 'fc') else self.model.classifier[1].out_features
+        
+        # Get class names from the test loader dataset
+        if hasattr(test_loader.dataset, 'dataset'):
+            # Handle the case where we have a Subset
+            class_names = test_loader.dataset.dataset.classes
+        else:
+            class_names = test_loader.dataset.classes
+        
+        # If the model has fewer classes than the test dataset, truncate class names
+        if len(class_names) > num_classes:
+            class_names = class_names[:num_classes]
+            # Also truncate labels if they exceed the model's class range
+            all_labels = [min(label, num_classes - 1) for label in all_labels]
+        
         accuracy = accuracy_score(all_labels, all_preds)
-        report = classification_report(all_labels, all_preds, target_names=['healthy', 'diseased'])
+        report = classification_report(all_labels, all_preds, target_names=class_names)
         
         return {
             'accuracy': accuracy,
             'report': report,
             'predictions': all_preds,
-            'labels': all_labels
+            'labels': all_labels,
+            'class_names': class_names
         }
     
     def save(self, path: str):
@@ -304,6 +331,13 @@ class CLICommands:
             self.config['data']['data_dir'], 
             transform=train_transform
         )
+        
+        # Debug: Check the classes found
+        print(f"Classes found in dataset: {train_dataset.classes}")
+        print(f"Number of classes: {len(train_dataset.classes)}")
+        
+        # Update config with actual number of classes
+        self.config['model']['num_classes'] = len(train_dataset.classes)
         
         # Split into train/val
         train_size = int(0.8 * len(train_dataset))
@@ -422,7 +456,7 @@ class CLICommands:
         self._plot_confusion_matrix(
             results['labels'], 
             results['predictions'], 
-            class_mapping['classes']
+            results['class_names']
         )
         
         logger.info(f"Evaluation accuracy: {results['accuracy']:.4f}")
@@ -474,7 +508,33 @@ class CLICommands:
         plt.close()
         
         logger.info(f"Confusion matrix saved to {plot_path}")
-
+    
+    def train_hyperspectral(self) -> Dict[str, Any]:
+        """Train model on hyperspectral data"""
+        if not HYPERSPECTRAL_AVAILABLE:
+            return {"error": "Hyperspectral processing not available"}
+        
+        logger.info("Starting hyperspectral training pipeline...")
+        
+        # Load hyperspecific config
+        hyperspectral_config_path = Path(__file__).parent / "config_hyperspectral.yaml"
+        with open(hyperspectral_config_path, 'r') as f:
+            hyperspectral_config = yaml.safe_load(f)
+        
+        # Initialize processor
+        processor = HyperspectralProcessor(hyperspectral_config)
+        
+        # Process data
+        features, labels = processor.process_directory(hyperspectral_config['data']['data_dir'])
+        
+        # Continue with training as in main_hyperspectral.py
+        # ... (rest of the implementation from main_hyperspectral.py)
+        
+        return {
+            "accuracy": results['accuracy'],
+            "model_path": str(model_path),
+            "features_shape": features.shape
+        }
 
 def main():
     """Main CLI function"""
@@ -484,7 +544,7 @@ def main():
         epilog="""
 Examples:
   # Train model with default config
-  python cli.py train --config config.yaml
+  python cli.py train
   
   # Make prediction on single image
   python cli.py predict --model ./models/grapevine_model.pth --image ./test_image.png
@@ -519,6 +579,8 @@ Examples:
                                 help='Path to trained model file')
     evaluate_parser.add_argument('--data-dir', type=str, required=True,
                                 help='Path to test data directory')
+    hyperspectral_parser = subparsers.add_parser('train-hyperspectral', 
+                                           help='Train model on hyperspectral data')
     
     # Parse arguments
     args = parser.parse_args()
@@ -567,7 +629,6 @@ Examples:
             import traceback
             traceback.print_exc()
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
