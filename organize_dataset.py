@@ -7,7 +7,7 @@ Organizes hyperspectral PNG images into training dataset structure
 for grapevine disease detection.
 
 Usage:
-    python organize_dataset.py --png-dir ./raw_png_images --output-dir ./organized_dataset --metadata description-2.csv
+    python organize_dataset.py --png-dir ./rawp_images --output-dir ./organized_dataset --metadata description-2.csv
 """
 
 import os
@@ -397,13 +397,13 @@ def main():
         epilog="""
 Examples:
   # Basic usage with default metadata
-  python organize_dataset.py --png-dir ./raw_png_images --output-dir ./organized_dataset
+  python organize_dataset.py --png-dir ./rawp_images --output-dir ./organized_dataset
   
   # Specify custom metadata file
-  python organize_dataset.py --png-dir ./raw_png_images --output-dir ./organized_dataset --metadata description-2.csv
+  python organize_dataset.py --png-dir ./rawp_images --output-dir ./organized_dataset --metadata description-2.csv
   
   # Verbose output for debugging
-  python organize_dataset.py --png-dir ./raw_png_images --output-dir ./organized_dataset --verbose
+  python organize_dataset.py --png-dir ./rawp_images --output-dir ./organized_dataset --verbose
         """
     )
     

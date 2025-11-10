@@ -31,14 +31,6 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import seaborn as sns
 
-try:
-    from hyperspectral_processor import HyperspectralProcessor
-    from main_hyperspectral import HyperspectralModelTrainer
-    HYPERSPECTRAL_AVAILABLE = True
-except ImportError:
-    HYPERSPECTRAL_AVAILABLE = False
-    print("Hyperspectral processing not available. Install required packages.")
-
 logger = logging.getLogger(__name__)
 
 
@@ -301,7 +293,6 @@ class GrapevineDiseaseModel:
 
 
 class CLICommands:
-    """Class containing CLI command implementations"""
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -509,32 +500,7 @@ class CLICommands:
         
         logger.info(f"Confusion matrix saved to {plot_path}")
     
-    def train_hyperspectral(self) -> Dict[str, Any]:
-        """Train model on hyperspectral data"""
-        if not HYPERSPECTRAL_AVAILABLE:
-            return {"error": "Hyperspectral processing not available"}
-        
-        logger.info("Starting hyperspectral training pipeline...")
-        
-        # Load hyperspecific config
-        hyperspectral_config_path = Path(__file__).parent / "config_hyperspectral.yaml"
-        with open(hyperspectral_config_path, 'r') as f:
-            hyperspectral_config = yaml.safe_load(f)
-        
-        # Initialize processor
-        processor = HyperspectralProcessor(hyperspectral_config)
-        
-        # Process data
-        features, labels = processor.process_directory(hyperspectral_config['data']['data_dir'])
-        
-        # Continue with training as in main_hyperspectral.py
-        # ... (rest of the implementation from main_hyperspectral.py)
-        
-        return {
-            "accuracy": results['accuracy'],
-            "model_path": str(model_path),
-            "features_shape": features.shape
-        }
+    
 
 def main():
     """Main CLI function"""
